@@ -42,17 +42,14 @@ tap = true
 tap_timeout_ms = 180
 tap_move_threshold = 20
 
-[button_gestures]
-step_degrees = 30.0
-left_clockwise = ["KEY_LEFTALT", "KEY_ESC"]
-left_counterclockwise = ["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"]
-right_clockwise = ["KEY_LEFTMETA", "KEY_PAGEDOWN"]
-right_counterclockwise = ["KEY_LEFTMETA", "KEY_PAGEUP"]
-
 [two_finger_swipe]
 enabled = true
 distance = 80
-up = ["KEY_LEFTMETA"]
+left = ["KEY_LEFTALT", "KEY_ESC"]
+right = ["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"]
+
+[native_gestures]
+enabled = true
 EOF
 else
     echo "==> Preserving existing configuration ${CONFIG_PATH}"
@@ -64,8 +61,9 @@ install -m 0644 "${SCRIPT_DIR}/circulartrackpad.service" "${UNIT_PATH}"
 echo "==> Reloading systemd user daemon"
 systemctl --user daemon-reload
 
-echo "==> Enabling and starting circulartrackpad.service"
-systemctl --user enable --now circulartrackpad.service
+echo "==> Enabling and restarting circulartrackpad.service"
+systemctl --user enable circulartrackpad.service
+systemctl --user restart circulartrackpad.service
 
 echo
 echo "Configuration: ${CONFIG_PATH}"

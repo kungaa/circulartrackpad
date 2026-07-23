@@ -48,7 +48,7 @@ pub struct Cli {
     #[arg(long, conflicts_with = "no_tap")]
     pub tap: bool,
 
-    /// Disable tap-to-click and restore physical left/right buttons
+    /// Disable tap-to-click
     #[arg(long, conflicts_with = "tap")]
     pub no_tap: bool,
 
@@ -129,19 +129,16 @@ impl Shortcut {
 }
 
 #[derive(Debug, Clone)]
-pub struct ButtonGestures {
-    pub step_degrees: f64,
-    pub left_clockwise: Shortcut,
-    pub left_counterclockwise: Shortcut,
-    pub right_clockwise: Shortcut,
-    pub right_counterclockwise: Shortcut,
-}
-
-#[derive(Debug, Clone)]
 pub struct TwoFingerSwipe {
     pub enabled: bool,
     pub distance: i32,
-    pub up: Shortcut,
+    pub left: Shortcut,
+    pub right: Shortcut,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeGestures {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -156,20 +153,15 @@ pub struct Config {
     pub tap: bool,
     pub tap_timeout_ms: u64,
     pub tap_move_threshold: i32,
-    pub button_gestures: ButtonGestures,
     pub two_finger_swipe: TwoFingerSwipe,
+    pub native_gestures: NativeGestures,
+    pub warnings: Vec<String>,
 }
 
 impl Config {
     pub fn keyboard_keys(&self) -> HashSet<KeyCode> {
         let mut keys = HashSet::new();
-        for shortcut in [
-            &self.button_gestures.left_clockwise,
-            &self.button_gestures.left_counterclockwise,
-            &self.button_gestures.right_clockwise,
-            &self.button_gestures.right_counterclockwise,
-            &self.two_finger_swipe.up,
-        ] {
+        for shortcut in [&self.two_finger_swipe.left, &self.two_finger_swipe.right] {
             keys.extend(shortcut.0.iter().copied());
         }
         keys
@@ -189,10 +181,12 @@ struct FileConfig {
     tap_move_threshold: Option<i32>,
     button_gestures: Option<FileButtonGestures>,
     two_finger_swipe: Option<FileTwoFingerSwipe>,
+    native_gestures: Option<FileNativeGestures>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(dead_code)]
 struct FileButtonGestures {
     step_degrees: Option<f64>,
     left_clockwise: Option<Vec<String>>,
@@ -207,6 +201,14 @@ struct FileTwoFingerSwipe {
     enabled: Option<bool>,
     distance: Option<i32>,
     up: Option<Vec<String>>,
+    left: Option<Vec<String>>,
+    right: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileNativeGestures {
+    enabled: Option<bool>,
 }
 
 pub fn config_path() -> Result<PathBuf, ConfigError> {
@@ -255,8 +257,21 @@ pub fn load_from_path(cli: &Cli, path: &Path) -> Result<Config, ConfigError> {
         }
     };
 
-    let button = file.button_gestures.unwrap_or_default();
+    let mut warnings = Vec::new();
+    if file.button_gestures.is_some() {
+        warnings.push(
+            "[button_gestures] is deprecated and ignored; physical buttons are always passed through"
+                .to_string(),
+        );
+    }
     let swipe = file.two_finger_swipe.unwrap_or_default();
+    if swipe.up.is_some() {
+        warnings.push(
+            "two_finger_swipe.up is deprecated and ignored; vertical swipes use native GNOME gestures"
+                .to_string(),
+        );
+    }
+    let native = file.native_gestures.unwrap_or_default();
 
     let pointer = cli.pointer.or(file.pointer).unwrap_or(1.5);
     let scroll = cli.scroll.or(file.scroll).unwrap_or(5.0);
@@ -295,13 +310,6 @@ pub fn load_from_path(cli: &Cli, path: &Path) -> Result<Config, ConfigError> {
         ));
     }
 
-    let step_degrees = button.step_degrees.unwrap_or(30.0);
-    if !step_degrees.is_finite() || !(0.0 < step_degrees && step_degrees <= 360.0) {
-        return Err(ConfigError::new(
-            "button_gestures.step_degrees must be within 0.0 (exclusive)..=360.0",
-        ));
-    }
-
     let swipe_distance = swipe.distance.unwrap_or(80);
     if swipe_distance <= tap_move_threshold {
         return Err(ConfigError::new(
@@ -331,41 +339,26 @@ pub fn load_from_path(cli: &Cli, path: &Path) -> Result<Config, ConfigError> {
         tap,
         tap_timeout_ms,
         tap_move_threshold,
-        button_gestures: ButtonGestures {
-            step_degrees,
-            left_clockwise: Shortcut::parse(
-                "button_gestures.left_clockwise",
-                button
-                    .left_clockwise
-                    .unwrap_or_else(|| key_names(&["KEY_LEFTALT", "KEY_ESC"])),
-            )?,
-            left_counterclockwise: Shortcut::parse(
-                "button_gestures.left_counterclockwise",
-                button
-                    .left_counterclockwise
-                    .unwrap_or_else(|| key_names(&["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"])),
-            )?,
-            right_clockwise: Shortcut::parse(
-                "button_gestures.right_clockwise",
-                button
-                    .right_clockwise
-                    .unwrap_or_else(|| key_names(&["KEY_LEFTMETA", "KEY_PAGEDOWN"])),
-            )?,
-            right_counterclockwise: Shortcut::parse(
-                "button_gestures.right_counterclockwise",
-                button
-                    .right_counterclockwise
-                    .unwrap_or_else(|| key_names(&["KEY_LEFTMETA", "KEY_PAGEUP"])),
-            )?,
-        },
         two_finger_swipe: TwoFingerSwipe {
             enabled: swipe.enabled.unwrap_or(true),
             distance: swipe_distance,
-            up: Shortcut::parse(
-                "two_finger_swipe.up",
-                swipe.up.unwrap_or_else(|| key_names(&["KEY_LEFTMETA"])),
+            left: Shortcut::parse(
+                "two_finger_swipe.left",
+                swipe
+                    .left
+                    .unwrap_or_else(|| key_names(&["KEY_LEFTALT", "KEY_ESC"])),
+            )?,
+            right: Shortcut::parse(
+                "two_finger_swipe.right",
+                swipe.right.unwrap_or_else(|| {
+                    key_names(&["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"])
+                }),
             )?,
         },
+        native_gestures: NativeGestures {
+            enabled: native.enabled.unwrap_or(true),
+        },
+        warnings,
     })
 }
 
@@ -447,6 +440,8 @@ mod tests {
         assert!(!config.file_found);
         assert_eq!(config.pointer, 1.5);
         assert_eq!(config.two_finger_swipe.distance, 80);
+        assert!(config.native_gestures.enabled);
+        assert!(config.warnings.is_empty());
     }
 
     #[test]
@@ -493,7 +488,7 @@ mod tests {
         fs::remove_file(unknown_field).unwrap();
 
         let unknown_key =
-            temp_config("[button_gestures]\nleft_clockwise = [\"KEY_NOT_A_REAL_KEY\"]\n");
+            temp_config("[two_finger_swipe]\nleft = [\"KEY_NOT_A_REAL_KEY\"]\n");
         assert!(load_from_path(&cli(), &unknown_key)
             .unwrap_err()
             .to_string()
@@ -507,7 +502,7 @@ mod tests {
         assert!(load_from_path(&cli(), &malformed).is_err());
         fs::remove_file(malformed).unwrap();
 
-        let empty = temp_config("[two_finger_swipe]\nup = []\n");
+        let empty = temp_config("[two_finger_swipe]\nleft = []\n");
         assert!(load_from_path(&cli(), &empty)
             .unwrap_err()
             .to_string()
@@ -515,7 +510,7 @@ mod tests {
         fs::remove_file(empty).unwrap();
 
         let duplicate =
-            temp_config("[two_finger_swipe]\nup = [\"KEY_LEFTMETA\", \"KEY_LEFTMETA\"]\n");
+            temp_config("[two_finger_swipe]\nright = [\"KEY_ESC\", \"KEY_ESC\"]\n");
         assert!(load_from_path(&cli(), &duplicate)
             .unwrap_err()
             .to_string()
@@ -539,8 +534,42 @@ mod tests {
         let config = load_from_path(&cli(), Path::new("/missing")).unwrap();
         let keys = config.keyboard_keys();
         assert!(keys.contains(&KeyCode::KEY_LEFTALT));
-        assert!(keys.contains(&KeyCode::KEY_LEFTMETA));
-        assert!(keys.contains(&KeyCode::KEY_PAGEDOWN));
+        assert!(keys.contains(&KeyCode::KEY_LEFTSHIFT));
+        assert!(keys.contains(&KeyCode::KEY_ESC));
+        assert!(!keys.contains(&KeyCode::KEY_LEFTMETA));
+    }
+
+    #[test]
+    fn legacy_gesture_fields_are_accepted_ignored_and_warned() {
+        let path = temp_config(
+            "[button_gestures]\n\
+             step_degrees = 30.0\n\
+             left_clockwise = [\"KEY_NOT_A_REAL_KEY\"]\n\
+             left_counterclockwise = []\n\
+             right_clockwise = [\"anything\"]\n\
+             right_counterclockwise = [\"KEY_LEFTMETA\"]\n\
+             [two_finger_swipe]\n\
+             up = []\n",
+        );
+        let config = load_from_path(&cli(), &path).unwrap();
+        assert_eq!(config.warnings.len(), 2);
+        assert!(config.warnings[0].contains("button_gestures"));
+        assert!(config.warnings[1].contains("two_finger_swipe.up"));
+        assert_eq!(
+            config.two_finger_swipe.left,
+            Shortcut(vec![KeyCode::KEY_LEFTALT, KeyCode::KEY_ESC])
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_fields_inside_legacy_section() {
+        let path = temp_config("[button_gestures]\nnot_a_legacy_field = true\n");
+        assert!(load_from_path(&cli(), &path)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field"));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

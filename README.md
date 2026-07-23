@@ -9,11 +9,13 @@ to the unusually small 44 mm pad:
 - inner-disc pointer movement
 - outer-ring scrolling
 - one-finger left-click and two-finger right-click taps
-- two-finger upward swipe to toggle GNOME Activities
-- physical-button plus ring navigation for windows and workspaces
+- ordinary passthrough for all physical buttons
+- two-finger horizontal window switching
+- native GNOME Activities and workspace swipes
 
 The daemon exclusively grabs the real `evdev` device and creates virtual
-pointer and keyboard devices through `uinput`.
+pointer, shortcut-keyboard, and gesture-only touchpad devices through
+`uinput`.
 
 ## Hardware
 
@@ -35,7 +37,8 @@ cd circulartrackpad
 The installer builds the release binary, copies it to
 `/usr/local/bin/circulartrackpad`, and installs a udev rule granting the
 active local-seat user access to the Panasonic trackpad and `/dev/uinput`.
-No `input` group membership is needed.
+The same rule classifies the gesture-only uinput device as a touchpad. No
+`input` group membership is needed.
 
 Log out and back in once if the new device ACLs are not immediately present.
 
@@ -49,7 +52,7 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/circulartrackpad/config.toml
 
 Run `./enable-autostart.sh` after installation. It creates a commented
 default config only when the file does not already exist, installs an
-argument-free systemd user unit, and starts it.
+argument-free systemd user unit, and restarts it so upgrades take effect.
 
 ```bash
 ./enable-autostart.sh
@@ -73,23 +76,24 @@ tap = true
 tap_timeout_ms = 180
 tap_move_threshold = 20
 
-[button_gestures]
-step_degrees = 30.0
-left_clockwise = ["KEY_LEFTALT", "KEY_ESC"]
-left_counterclockwise = ["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"]
-right_clockwise = ["KEY_LEFTMETA", "KEY_PAGEDOWN"]
-right_counterclockwise = ["KEY_LEFTMETA", "KEY_PAGEUP"]
-
 [two_finger_swipe]
 enabled = true
 distance = 80
-up = ["KEY_LEFTMETA"]
+left = ["KEY_LEFTALT", "KEY_ESC"]
+right = ["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"]
+
+[native_gestures]
+enabled = true
 ```
 
 Shortcut arrays use Linux `KEY_*` names in press order. This makes the
-defaults replaceable for customized GNOME shortcuts or another desktop.
+window-switching defaults replaceable for customized GNOME shortcuts.
 Unknown fields, invalid values, unknown key names, duplicate keys, and empty
 shortcuts are rejected.
+
+Older `[button_gestures]` and `two_finger_swipe.up` settings remain accepted
+for upgrade compatibility, but are ignored with a warning. Remove them after
+upgrading.
 
 Command-line options remain useful for temporary testing and override the
 config:
@@ -105,59 +109,61 @@ circulartrackpad restart
   -i, --invert-scroll               Invert scroll direction
       --no-invert-scroll            Do not invert scroll direction
       --tap                         Enable tap-to-click
-      --no-tap                      Disable taps and restore physical buttons
+      --no-tap                      Disable tap-to-click
       --tap-timeout <MILLISECONDS>  Tap timeout
       --tap-move-threshold <UNITS>  Tap movement threshold
 ```
 
 ## Gestures
 
-### Ring navigation
+### Physical buttons and ring scrolling
 
-With tap-to-click enabled, the two physical buttons become navigation mode
-buttons rather than mouse buttons:
+Left, right, and middle physical buttons are always forwarded as ordinary
+mouse buttons. Tap-to-click does not change their meaning.
 
-- `BTN_LEFT` + clockwise ring: next window
-- `BTN_LEFT` + counterclockwise ring: previous window
-- `BTN_RIGHT` + clockwise ring: workspace right
-- `BTN_RIGHT` + counterclockwise ring: workspace left
+One-finger outer-ring motion always scrolls, including while a physical
+button is held. Set `tap = false` or pass `--no-tap` only when tap-to-click
+itself is unwanted.
 
-The default GNOME shortcuts are `Alt+Esc`, `Shift+Alt+Esc`,
-`Super+PageDown`, and `Super+PageUp`. One action is emitted per 30 degrees by
-default. Button-first and ring-first operation both work. Holding both
-buttons suppresses navigation.
+### Two-finger swipes
 
-Set `tap = false` or pass `--no-tap` to disable button-ring navigation and
-restore ordinary physical left/right clicks. The physical middle button is
-always forwarded.
+Start with two fingers in the inner zone:
 
-### Two-finger Activities swipe
+- swipe left: next window (`Alt+Esc` by default)
+- swipe right: previous window (`Shift+Alt+Esc` by default)
+- swipe up/down: GNOME's progressive Activities gesture
 
-Place two fingers in the inner zone and move both upward. Once their centroid
-has moved 80 raw units (about 6.7 mm on the supported pad), the daemon taps
-`Super` to toggle GNOME Activities.
+Horizontal switching fires once after the centroid moves 80 raw units (about
+6.7 mm). Vertical movement is translated into a native three-contact stream,
+so the animation follows the fingers and GNOME decides whether to open or
+close Activities. A short two-finger tap remains right-click.
 
-This is a discrete shortcut, not GNOME's progressive three-finger animation.
-An upward swipe while Activities is already open therefore closes it.
-Downward or primarily horizontal movement is ignored. A short two-finger tap
-still emits right-click; movement between the tap and swipe thresholds emits
-neither action.
+### Three- and four-finger swipes
 
-The two-finger swipe remains available under `--no-tap`, but it is disabled
-for a contact sequence that overlaps a held physical button.
+Three- and four-finger contacts take priority across the full pad and are
+forwarded through the gesture-only virtual touchpad. On current GNOME Wayland,
+horizontal swipes switch workspaces and vertical swipes control Activities.
+Five-finger and interrupted sequences are ignored until every finger lifts.
+
+Set `[native_gestures] enabled = false` to skip the gesture touchpad. Pointer,
+ring, taps, physical buttons, and two-finger horizontal window switching
+remain available, but native vertical/workspace gestures do not.
 
 ## How it works
 
-Touches are classified by where the primary finger begins. An inner-zone
-touch produces relative pointer motion. A ring-zone touch converts angular
-movement into high-resolution and legacy wheel events. The zone remains
-locked until lift so drift cannot change modes unexpectedly.
+Single touches are classified by where the primary finger begins. An
+inner-zone touch produces relative pointer motion. A ring-zone touch converts
+angular movement into high-resolution and legacy wheel events. The zone
+remains locked until lift so drift cannot change modes unexpectedly.
 
-The physical device reports five multitouch slots, but the compositor sees a
-mouse-like virtual pointer rather than a touchpad. GNOME therefore cannot
-recognize native three/four-finger gestures from it. The daemon recognizes
-the compact gestures itself and emits configurable shortcuts from a separate
-virtual keyboard.
+The compositor sees normal pointer events from one virtual device and native
+multitouch gesture sequences from a separate four-slot virtual touchpad.
+Two-finger vertical motion is represented as three virtual contacts; real
+three/four-finger positions retain stable virtual slots. The gesture device
+is intentionally silent for taps, pointer movement, and ring scrolling, so
+it cannot duplicate those actions.
+
+Native gestures require GNOME on Wayland. There is no Xorg gesture fallback.
 
 ## Development and testing
 

@@ -5,14 +5,19 @@ use clap::Parser;
 use config::{Cli, CliCommand, Config};
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AttributeSet, Device, EventType, InputEvent, KeyCode, RelativeAxisCode, SynchronizationCode,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, Device, EventType, InputEvent, KeyCode, PropType,
+    RelativeAxisCode, SynchronizationCode, UinputAbsSetup,
 };
-use gestures::{DriverState, Event, Output, PhysicalButton, PointerEvent};
+use gestures::{DriverState, Event, NativeContact, Output, PhysicalButton, PointerEvent};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::Instant;
 
 const TRACKPAD_NAME: &str = "Synaptics TM3562-003";
+const GESTURE_DEVICE_NAME: &str = "circulartrackpad gestures";
+const PAD_MAX: i32 = 528;
+const PAD_RESOLUTION: i32 = 12;
+const NATIVE_SLOT_COUNT: usize = 4;
 const ABS_MT_SLOT: u16 = 0x2f;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
 const ABS_MT_POSITION_X: u16 = 0x35;
@@ -25,6 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("daemon options cannot be combined with 'restart'".into());
         }
         let config = config::load(&cli)?;
+        print_config_warnings(&config);
         println!(
             "circulartrackpad: configuration valid ({})",
             config.path.display()
@@ -35,7 +41,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let config = config::load(&cli)?;
+    print_config_warnings(&config);
     run(config)
+}
+
+fn print_config_warnings(config: &Config) {
+    for warning in &config.warnings {
+        eprintln!("circulartrackpad: warning: {warning}");
+    }
 }
 
 fn run(config: Config) -> Result<(), Box<dyn Error>> {
@@ -84,8 +97,20 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
 
     let mut pointer = build_virtual_pointer()?;
     let mut keyboard = build_virtual_keyboard(&config)?;
+    let mut native_gestures = if config.native_gestures.enabled {
+        Some(build_virtual_gesture_touchpad()?)
+    } else {
+        None
+    };
+    let mut native_state = NativeOutputState::default();
     let mut state = DriverState::new(&config);
-    println!("circulartrackpad: virtual pointer and shortcut keyboard created");
+    if native_gestures.is_some() {
+        println!(
+            "circulartrackpad: virtual pointer, shortcut keyboard, and native gesture touchpad created"
+        );
+    } else {
+        println!("circulartrackpad: virtual pointer and shortcut keyboard created");
+    }
 
     loop {
         for input in device.fetch_events()? {
@@ -119,7 +144,13 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
             };
 
             if let Some(event) = event {
-                emit_outputs(&mut pointer, &mut keyboard, state.process(event, now))?;
+                emit_outputs(
+                    &mut pointer,
+                    &mut keyboard,
+                    native_gestures.as_mut(),
+                    &mut native_state,
+                    state.process(event, now),
+                )?;
             }
         }
     }
@@ -157,11 +188,56 @@ fn build_virtual_keyboard(config: &Config) -> Result<VirtualDevice, Box<dyn Erro
         .build()?)
 }
 
+fn build_virtual_gesture_touchpad() -> Result<VirtualDevice, Box<dyn Error>> {
+    let mut keys = AttributeSet::<KeyCode>::new();
+    for key in [
+        KeyCode::BTN_TOUCH,
+        KeyCode::BTN_TOOL_FINGER,
+        KeyCode::BTN_TOOL_DOUBLETAP,
+        KeyCode::BTN_TOOL_TRIPLETAP,
+        KeyCode::BTN_TOOL_QUADTAP,
+    ] {
+        keys.insert(key);
+    }
+
+    let mut properties = AttributeSet::<PropType>::new();
+    properties.insert(PropType::POINTER);
+
+    let coordinate = AbsInfo::new(0, 0, PAD_MAX, 0, 0, PAD_RESOLUTION);
+    let slot = AbsInfo::new(0, 0, NATIVE_SLOT_COUNT as i32 - 1, 0, 0, 0);
+    let tracking_id = AbsInfo::new(0, 0, 65_535, 0, 0, 0);
+    let axes = [
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, coordinate),
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, coordinate),
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_MT_SLOT, slot),
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_MT_TRACKING_ID, tracking_id),
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_MT_POSITION_X, coordinate),
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_MT_POSITION_Y, coordinate),
+    ];
+
+    let mut builder = VirtualDevice::builder()?
+        .name(GESTURE_DEVICE_NAME)
+        .with_keys(&keys)?
+        .with_properties(&properties)?;
+    for axis in &axes {
+        builder = builder.with_absolute_axis(axis)?;
+    }
+    Ok(builder.build()?)
+}
+
+#[derive(Default)]
+struct NativeOutputState {
+    tracking_ids: [Option<i32>; NATIVE_SLOT_COUNT],
+}
+
 fn emit_outputs(
     pointer: &mut VirtualDevice,
     keyboard: &mut VirtualDevice,
+    native_gestures: Option<&mut VirtualDevice>,
+    native_state: &mut NativeOutputState,
     outputs: Vec<Output>,
 ) -> Result<(), Box<dyn Error>> {
+    let mut native_gestures = native_gestures;
     for output in outputs {
         match output {
             Output::PointerFrame(events) => {
@@ -184,9 +260,91 @@ fn emit_outputs(
                     .collect();
                 keyboard.emit(&released)?;
             }
+            Output::NativeFrame(contacts) => {
+                let device = native_gestures
+                    .as_deref_mut()
+                    .ok_or("native gesture output requested while native gestures are disabled")?;
+                emit_native_frame(device, native_state, &contacts)?;
+            }
         }
     }
     Ok(())
+}
+
+fn emit_native_frame(
+    device: &mut VirtualDevice,
+    state: &mut NativeOutputState,
+    contacts: &[NativeContact],
+) -> Result<(), Box<dyn Error>> {
+    if contacts.len() > NATIVE_SLOT_COUNT {
+        return Err("native gesture frame exceeds four contacts".into());
+    }
+
+    let mut by_slot = [None; NATIVE_SLOT_COUNT];
+    for contact in contacts {
+        if contact.slot >= NATIVE_SLOT_COUNT {
+            return Err(format!("invalid native gesture slot {}", contact.slot).into());
+        }
+        if by_slot[contact.slot].replace(*contact).is_some() {
+            return Err(format!("duplicate native gesture slot {}", contact.slot).into());
+        }
+    }
+
+    let mut events = Vec::new();
+    for (slot, contact) in by_slot.iter().enumerate() {
+        events.push(absolute_event(
+            AbsoluteAxisCode::ABS_MT_SLOT,
+            slot as i32,
+        ));
+        let next_tracking_id = contact.as_ref().map(|contact| contact.tracking_id);
+        if state.tracking_ids[slot] != next_tracking_id {
+            if state.tracking_ids[slot].is_some() {
+                events.push(absolute_event(
+                    AbsoluteAxisCode::ABS_MT_TRACKING_ID,
+                    -1,
+                ));
+            }
+            if let Some(tracking_id) = next_tracking_id {
+                events.push(absolute_event(
+                    AbsoluteAxisCode::ABS_MT_TRACKING_ID,
+                    tracking_id,
+                ));
+            }
+            state.tracking_ids[slot] = next_tracking_id;
+        }
+        if let Some(contact) = contact.as_ref() {
+            events.push(absolute_event(
+                AbsoluteAxisCode::ABS_MT_POSITION_X,
+                contact.x,
+            ));
+            events.push(absolute_event(
+                AbsoluteAxisCode::ABS_MT_POSITION_Y,
+                contact.y,
+            ));
+        }
+    }
+
+    if let Some(primary) = contacts.first() {
+        events.push(absolute_event(AbsoluteAxisCode::ABS_X, primary.x));
+        events.push(absolute_event(AbsoluteAxisCode::ABS_Y, primary.y));
+    }
+
+    let count = contacts.len();
+    for (key, value) in [
+        (KeyCode::BTN_TOUCH, i32::from(count > 0)),
+        (KeyCode::BTN_TOOL_FINGER, i32::from(count == 1)),
+        (KeyCode::BTN_TOOL_DOUBLETAP, i32::from(count == 2)),
+        (KeyCode::BTN_TOOL_TRIPLETAP, i32::from(count == 3)),
+        (KeyCode::BTN_TOOL_QUADTAP, i32::from(count == 4)),
+    ] {
+        events.push(InputEvent::new(EventType::KEY.0, key.code(), value));
+    }
+    device.emit(&events)?;
+    Ok(())
+}
+
+fn absolute_event(axis: AbsoluteAxisCode, value: i32) -> InputEvent {
+    InputEvent::new(EventType::ABSOLUTE.0, axis.0, value)
 }
 
 fn pointer_input_event(event: PointerEvent) -> InputEvent {

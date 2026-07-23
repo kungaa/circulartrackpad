@@ -29,6 +29,7 @@ sudo tee "${RULE_PATH}" > /dev/null <<EOF
 
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 SUBSYSTEM=="input", ATTRS{id/vendor}=="${VENDOR_ID}", ATTRS{id/product}=="${PRODUCT_ID}", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", ATTRS{name}=="circulartrackpad gestures", ENV{ID_INPUT}="1", ENV{ID_INPUT_MOUSE}="", ENV{ID_INPUT_TOUCHSCREEN}="", ENV{ID_INPUT_TOUCHPAD}="1"
 EOF
 
 echo "==> Reloading udev rules"

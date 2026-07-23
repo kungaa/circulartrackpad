@@ -1,40 +1,65 @@
 #!/usr/bin/env bash
-# Install and enable a systemd user service that starts circulartrackpad
-# at login. Any arguments passed to this script are forwarded to the
-# daemon, e.g.:
+# Install and enable the circulartrackpad systemd user service.
 #
-#     ./enable-autostart.sh -p 2.0 -s 6 -r 0.6
+# Persistent settings live in:
+#   ${XDG_CONFIG_HOME:-$HOME/.config}/circulartrackpad/config.toml
 #
-# To change options later, edit ~/.config/systemd/user/circulartrackpad.service
-# and run: systemctl --user daemon-reload && systemctl --user restart circulartrackpad
+# Edit that file and run `circulartrackpad restart` to apply changes.
 set -euo pipefail
 
 BIN="/usr/local/bin/circulartrackpad"
-UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_DIR="${CONFIG_HOME}/circulartrackpad"
+CONFIG_PATH="${CONFIG_DIR}/config.toml"
+UNIT_DIR="${CONFIG_HOME}/systemd/user"
 UNIT_PATH="${UNIT_DIR}/circulartrackpad.service"
+
+if (($# != 0)); then
+    echo "error: enable-autostart.sh no longer accepts daemon arguments." >&2
+    echo "Edit ${CONFIG_PATH}, then run: circulartrackpad restart" >&2
+    exit 2
+fi
 
 if [[ ! -x "${BIN}" ]]; then
     echo "error: ${BIN} not found. Run ./install.sh first." >&2
     exit 1
 fi
 
-DAEMON_ARGS="$*"
-EXEC_START="${BIN}${DAEMON_ARGS:+ ${DAEMON_ARGS}}"
+mkdir -p "${CONFIG_DIR}" "${UNIT_DIR}"
+
+if [[ ! -e "${CONFIG_PATH}" ]]; then
+    echo "==> Writing default configuration ${CONFIG_PATH}"
+    cat > "${CONFIG_PATH}" <<'EOF'
+# circulartrackpad user configuration
+# CLI options override values in this file.
+
+pointer = 1.5
+scroll = 5.0
+ring = 0.65
+invert_scroll = false
+tap = true
+tap_timeout_ms = 180
+tap_move_threshold = 20
+
+[button_gestures]
+step_degrees = 30.0
+left_clockwise = ["KEY_LEFTALT", "KEY_ESC"]
+left_counterclockwise = ["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"]
+right_clockwise = ["KEY_LEFTMETA", "KEY_PAGEDOWN"]
+right_counterclockwise = ["KEY_LEFTMETA", "KEY_PAGEUP"]
+
+[two_finger_swipe]
+enabled = true
+distance = 80
+up = ["KEY_LEFTMETA"]
+EOF
+else
+    echo "==> Preserving existing configuration ${CONFIG_PATH}"
+fi
 
 echo "==> Writing ${UNIT_PATH}"
-mkdir -p "${UNIT_DIR}"
-cat > "${UNIT_PATH}" <<EOF
-[Unit]
-Description=Circular trackpad daemon
-
-[Service]
-ExecStart=${EXEC_START}
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-EOF
+install -m 0644 "${SCRIPT_DIR}/circulartrackpad.service" "${UNIT_PATH}"
 
 echo "==> Reloading systemd user daemon"
 systemctl --user daemon-reload
@@ -42,6 +67,9 @@ systemctl --user daemon-reload
 echo "==> Enabling and starting circulartrackpad.service"
 systemctl --user enable --now circulartrackpad.service
 
+echo
+echo "Configuration: ${CONFIG_PATH}"
+echo "Apply future changes with: circulartrackpad restart"
 echo
 echo "Status:"
 systemctl --user --no-pager status circulartrackpad.service || true

@@ -2,37 +2,29 @@
 
 ![A photo of the trackpad on my Panasonic laptop.](trackpad.jpeg)
 
-A small userspace daemon that makes the **circular ring gesture** on the
-Panasonic Let's Note trackpad work as a scroll wheel under Wayland.
+A userspace daemon for the circular Panasonic Let's Note trackpad. It
+restores outer-ring scrolling under Wayland and adds compact gestures suited
+to the unusually small 44 mm pad:
 
-Panasonic Let's Note laptops ship with a distinctive round trackpad whose
-outer ring is meant to be used as a rotary scroll control. Under X11 this
-was handled by the old `xf86-input-synaptics` driver (`CircularScrolling`
-option). `libinput` — which every Wayland compositor uses — dropped
-circular scroll support, so on Wayland the ring zone just moves the
-pointer like any other spot on the pad.
+- inner-disc pointer movement
+- outer-ring scrolling
+- one-finger left-click and two-finger right-click taps
+- two-finger upward swipe to toggle GNOME Activities
+- physical-button plus ring navigation for windows and workspaces
 
-`circulartrackpad` restores the feature in userspace:
-
-1. Grabs the real trackpad's `evdev` node exclusively.
-2. Creates a virtual pointer device via `uinput`.
-3. Classifies each touch: the **inner disc** becomes pointer motion, the
-   **outer ring** becomes `REL_WHEEL` ticks based on angular movement.
-
-The compositor sees a plain mouse-like device, so it works in GNOME,
-KDE, Sway, or anything else — no extensions or plugins needed.
+The daemon exclusively grabs the real `evdev` device and creates virtual
+pointer and keyboard devices through `uinput`.
 
 ## Hardware
 
-Developed and tested on a Panasonic Let's Note with a
-**Synaptics TM3562-003** touchpad (HID `06cb:cdea`). Other Let's Note
-models with a different touchpad controller will need the vendor/product
-IDs in `install.sh` and the coordinate range in `src/main.rs` adjusted —
-see *Porting* below.
+Developed and tested on a Panasonic Let's Note with a **Synaptics
+TM3562-003** touchpad (HID `06cb:cdea`, coordinates `0..528`). Other models
+may require changes to the vendor/product IDs in `install.sh` and the
+geometry constants in the driver.
 
 ## Install
 
-Requires Rust (stable) and a Linux system with `udev` and `uinput`.
+Requires stable Rust and a Linux system with `udev`, `uinput`, and systemd:
 
 ```bash
 git clone https://github.com/mikiobraun/circulartrackpad
@@ -40,99 +32,148 @@ cd circulartrackpad
 ./install.sh
 ```
 
-The installer:
+The installer builds the release binary, copies it to
+`/usr/local/bin/circulartrackpad`, and installs a udev rule granting the
+active local-seat user access to the Panasonic trackpad and `/dev/uinput`.
+No `input` group membership is needed.
 
-- builds the release binary
-- copies it to `/usr/local/bin/circulartrackpad`
-- writes a udev rule to `/etc/udev/rules.d/70-circulartrackpad.rules`
-  that grants the active local-seat user access to the trackpad and
-  `/dev/uinput` via POSIX ACLs (systemd `uaccess`)
-- reloads udev
+Log out and back in once if the new device ACLs are not immediately present.
 
-Log out and back in once after install so the ACLs apply, then run:
+## Configuration
+
+Persistent settings use the XDG user configuration location:
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/circulartrackpad/config.toml
+```
+
+Run `./enable-autostart.sh` after installation. It creates a commented
+default config only when the file does not already exist, installs an
+argument-free systemd user unit, and starts it.
 
 ```bash
-circulartrackpad --help
+./enable-autostart.sh
 ```
 
-No `sudo`, no `input` group membership needed — only the user currently
-logged in at the physical seat can access the devices, and access is
-revoked on logout.
+Edit `config.toml`, then validate and apply it with:
 
-## Usage
-
+```bash
+circulartrackpad restart
 ```
+
+Invalid configuration is reported without stopping the currently running
+service. A missing config is valid and uses built-in defaults.
+
+```toml
+pointer = 1.5
+scroll = 5.0
+ring = 0.65
+invert_scroll = false
+tap = true
+tap_timeout_ms = 180
+tap_move_threshold = 20
+
+[button_gestures]
+step_degrees = 30.0
+left_clockwise = ["KEY_LEFTALT", "KEY_ESC"]
+left_counterclockwise = ["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"]
+right_clockwise = ["KEY_LEFTMETA", "KEY_PAGEDOWN"]
+right_counterclockwise = ["KEY_LEFTMETA", "KEY_PAGEUP"]
+
+[two_finger_swipe]
+enabled = true
+distance = 80
+up = ["KEY_LEFTMETA"]
+```
+
+Shortcut arrays use Linux `KEY_*` names in press order. This makes the
+defaults replaceable for customized GNOME shortcuts or another desktop.
+Unknown fields, invalid values, unknown key names, duplicate keys, and empty
+shortcuts are rejected.
+
+Command-line options remain useful for temporary testing and override the
+config:
+
+```text
 circulartrackpad [OPTIONS]
+circulartrackpad restart
 
-  -d, --device <DEVICE>    Input device path [default: auto-detect]
-  -p, --pointer <POINTER>  Pointer sensitivity multiplier [default: 1.5]
-  -s, --scroll <SCROLL>    Scroll ticks per radian of ring rotation [default: 5]
-  -r, --ring <RING>        Ring threshold as fraction of max radius [default: 0.65]
-  -i, --invert-scroll      Invert scroll direction
-      --no-tap             Disable tap-to-click
-      --tap-timeout <MS>   Tap timeout in milliseconds [default: 180]
-      --tap-move-threshold <UNITS>
-                           Tap movement threshold in raw coordinate units [default: 20]
+  -d, --device <DEVICE>             Input device path [default: auto-detect]
+  -p, --pointer <POINTER>           Pointer sensitivity
+  -s, --scroll <SCROLL>             Scroll ticks per radian
+  -r, --ring <RING>                 Ring threshold fraction (0.0-1.0)
+  -i, --invert-scroll               Invert scroll direction
+      --no-invert-scroll            Do not invert scroll direction
+      --tap                         Enable tap-to-click
+      --no-tap                      Disable taps and restore physical buttons
+      --tap-timeout <MILLISECONDS>  Tap timeout
+      --tap-move-threshold <UNITS>  Tap movement threshold
 ```
 
-By default the daemon auto-detects the Panasonic trackpad by its reported name
-(`Synaptics TM3562-003`). You only need `-d` if your trackpad shows up under a
-different name or you want to use an explicit event node.
+## Gestures
 
-Touch the inner area to move the pointer; slide your finger around the
-outer ring to scroll. Lower `--ring` values make the ring zone wider
-(easier to stay in while scrolling); higher values make it thinner.
+### Ring navigation
 
-Tap-to-click is enabled by default: a quick, single-finger tap in the
-inner zone emits a left button click, and a quick two-finger tap emits a
-right button click. Use `--no-tap` to disable this, or adjust the
-`--tap-timeout` and `--tap-move-threshold` if you find taps are being
-missed or triggered accidentally.
+With tap-to-click enabled, the two physical buttons become navigation mode
+buttons rather than mouse buttons:
 
-### Running at login
+- `BTN_LEFT` + clockwise ring: next window
+- `BTN_LEFT` + counterclockwise ring: previous window
+- `BTN_RIGHT` + clockwise ring: workspace right
+- `BTN_RIGHT` + counterclockwise ring: workspace left
 
-Once you're happy with the options, run:
+The default GNOME shortcuts are `Alt+Esc`, `Shift+Alt+Esc`,
+`Super+PageDown`, and `Super+PageUp`. One action is emitted per 30 degrees by
+default. Button-first and ring-first operation both work. Holding both
+buttons suppresses navigation.
 
-```bash
-./enable-autostart.sh -p 1.5 -s 5 -r 0.65
-```
+Set `tap = false` or pass `--no-tap` to disable button-ring navigation and
+restore ordinary physical left/right clicks. The physical middle button is
+always forwarded.
 
-Any arguments you pass to the script are baked into the systemd user
-unit's `ExecStart`. It writes
-`~/.config/systemd/user/circulartrackpad.service`, reloads the user
-daemon, and enables + starts the service. To change the options later
-either re-run the script or edit the unit file directly and
-`systemctl --user daemon-reload && systemctl --user restart circulartrackpad`.
+### Two-finger Activities swipe
 
-## Porting to other hardware
+Place two fingers in the inner zone and move both upward. Once their centroid
+has moved 80 raw units (about 6.7 mm on the supported pad), the daemon taps
+`Super` to toggle GNOME Activities.
 
-If your trackpad reports different HID IDs or a different coordinate
-range, two spots need updating:
+This is a discrete shortcut, not GNOME's progressive three-finger animation.
+An upward swipe while Activities is already open therefore closes it.
+Downward or primarily horizontal movement is ignored. A short two-finger tap
+still emits right-click; movement between the tap and swipe thresholds emits
+neither action.
 
-1. **`install.sh`** — change `VENDOR_ID` / `PRODUCT_ID` to match your
-   device (find them with `cat /proc/bus/input/devices`).
-2. **`src/main.rs`** — the `PAD_MAX` constant assumes `ABS_X`/`ABS_Y` go
-   from 0 to 528. Check your device with `sudo evtest` and adjust if
-   different. The classifier assumes a square, circular pad centered on
-   the origin of the coordinate space.
+The two-finger swipe remains available under `--no-tap`, but it is disabled
+for a contact sequence that overlaps a held physical button.
 
 ## How it works
 
-The daemon reads multitouch events (`ABS_MT_SLOT`, `ABS_MT_POSITION_X/Y`,
-`ABS_MT_TRACKING_ID`) and on each `SYN_REPORT` inspects slot 0 (the
-primary finger):
+Touches are classified by where the primary finger begins. An inner-zone
+touch produces relative pointer motion. A ring-zone touch converts angular
+movement into high-resolution and legacy wheel events. The zone remains
+locked until lift so drift cannot change modes unexpectedly.
 
-- If the finger is within `ring` of the max radius from center, it's in
-  the **ring zone**: compute the polar angle, take the delta from the
-  previous frame (with wraparound handling), accumulate fractional
-  scroll ticks, and emit `REL_WHEEL`.
-- Otherwise it's in the **inner zone**: emit `REL_X` / `REL_Y` deltas.
+The physical device reports five multitouch slots, but the compositor sees a
+mouse-like virtual pointer rather than a touchpad. GNOME therefore cannot
+recognize native three/four-finger gestures from it. The daemon recognizes
+the compact gestures itself and emits configurable shortcuts from a separate
+virtual keyboard.
 
-Physical button events (`BTN_LEFT`, `BTN_RIGHT`) are forwarded unchanged.
-In addition, because the daemon exclusively grabs the real touchpad,
-tap-to-click is implemented in userspace: a short, single-finger touch in
-the inner zone synthesizes `BTN_LEFT`, and a short two-finger touch
-synthesizes `BTN_RIGHT`.
+## Development and testing
+
+On Windows, Ubuntu WSL2 can build and test the Linux code:
+
+```bash
+rustup toolchain install stable
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build --release
+bash -n install.sh enable-autostart.sh
+```
+
+WSL does not expose the Panasonic `/dev/input` device, so final gesture and
+GNOME Wayland testing must be performed in the laptop's native Linux session.
 
 ## License
 

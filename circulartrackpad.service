@@ -1,0 +1,10 @@
+[Unit]
+Description=Circular trackpad daemon
+
+[Service]
+ExecStart=/usr/local/bin/circulartrackpad
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

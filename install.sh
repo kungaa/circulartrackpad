@@ -37,4 +37,4 @@ sudo udevadm trigger --subsystem-match=input --subsystem-match=misc
 
 echo
 echo "Done. You may need to log out and back in once for the ACLs to apply."
-echo "Then run: ${BIN_NAME} --help"
+echo "Then run: ./enable-autostart.sh"

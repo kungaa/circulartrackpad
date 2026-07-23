@@ -745,10 +745,13 @@ fn multi_contacts(
         }
     }
     for slot in &active {
-        if mapping.iter().all(|mapped| *mapped != Some(slot.tracking_id))
-            && let Some(empty) = mapping.iter_mut().find(|mapped| mapped.is_none())
+        if mapping
+            .iter()
+            .all(|mapped| *mapped != Some(slot.tracking_id))
         {
-            *empty = Some(slot.tracking_id);
+            if let Some(empty) = mapping.iter_mut().find(|mapped| mapped.is_none()) {
+                *empty = Some(slot.tracking_id);
+            }
         }
     }
 

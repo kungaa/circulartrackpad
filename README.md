@@ -29,18 +29,25 @@ geometry constants in the driver.
 Requires stable Rust and a Linux system with `udev`, `uinput`, and systemd:
 
 ```bash
-git clone https://github.com/mikiobraun/circulartrackpad
+git clone https://github.com/kungaa/circulartrackpad
 cd circulartrackpad
 ./install.sh
+./enable-autostart.sh
 ```
 
-The installer builds the release binary, copies it to
-`/usr/local/bin/circulartrackpad`, and installs a udev rule granting the
-active local-seat user access to the Panasonic trackpad and `/dev/uinput`.
-The same rule classifies the gesture-only uinput device as a touchpad. No
-`input` group membership is needed.
+`install.sh` builds and installs the binary and udev rules.
+`enable-autostart.sh` creates the config and starts the systemd user service.
+Log out and back in if the device permissions do not apply immediately.
 
-Log out and back in once if the new device ACLs are not immediately present.
+### Upgrading
+
+From an existing checkout:
+
+```bash
+git pull
+./install.sh
+./enable-autostart.sh
+```
 
 ## Configuration
 
@@ -50,13 +57,7 @@ Persistent settings use the XDG user configuration location:
 ${XDG_CONFIG_HOME:-$HOME/.config}/circulartrackpad/config.toml
 ```
 
-Run `./enable-autostart.sh` after installation. It creates a commented
-default config only when the file does not already exist, installs an
-argument-free systemd user unit, and restarts it so upgrades take effect.
-
-```bash
-./enable-autostart.sh
-```
+`enable-autostart.sh` preserves an existing config when upgrading.
 
 Edit `config.toml`, then validate and apply it with:
 
@@ -64,8 +65,8 @@ Edit `config.toml`, then validate and apply it with:
 circulartrackpad restart
 ```
 
-Invalid configuration is reported without stopping the currently running
-service. A missing config is valid and uses built-in defaults.
+Invalid configuration does not stop the running service. A missing config
+uses built-in defaults.
 
 ```toml
 pointer = 1.5
@@ -86,17 +87,13 @@ right = ["KEY_LEFTSHIFT", "KEY_LEFTALT", "KEY_ESC"]
 enabled = true
 ```
 
-Shortcut arrays use Linux `KEY_*` names in press order. This makes the
-window-switching defaults replaceable for customized GNOME shortcuts.
-Unknown fields, invalid values, unknown key names, duplicate keys, and empty
-shortcuts are rejected.
+Shortcut arrays use Linux `KEY_*` names in press order.
 
 Older `[button_gestures]` and `two_finger_swipe.up` settings remain accepted
 for upgrade compatibility, but are ignored with a warning. Remove them after
 upgrading.
 
-Command-line options remain useful for temporary testing and override the
-config:
+Command-line options override the config:
 
 ```text
 circulartrackpad [OPTIONS]
@@ -118,12 +115,8 @@ circulartrackpad restart
 
 ### Physical buttons and ring scrolling
 
-Left, right, and middle physical buttons are always forwarded as ordinary
-mouse buttons. Tap-to-click does not change their meaning.
-
-One-finger outer-ring motion always scrolls, including while a physical
-button is held. Set `tap = false` or pass `--no-tap` only when tap-to-click
-itself is unwanted.
+Physical buttons pass through unchanged. Outer-ring motion scrolls, including
+while a button is held.
 
 ### Two-finger swipes
 
@@ -133,44 +126,41 @@ Start with two fingers in the inner zone:
 - swipe right: previous window (`Shift+Alt+Esc` by default)
 - swipe up/down: GNOME's progressive Activities gesture
 
-Horizontal switching fires once after the centroid moves 80 raw units (about
-6.7 mm). Vertical movement is translated into a native three-contact stream,
-so the animation follows the fingers and GNOME decides whether to open or
-close Activities. A short two-finger tap remains right-click.
+Horizontal switching fires after the configured distance. Vertical movement
+drives GNOME's native gesture animation. A short two-finger tap remains
+right-click.
 
 ### Three- and four-finger swipes
 
-Three- and four-finger contacts take priority across the full pad and are
-forwarded through the gesture-only virtual touchpad. On current GNOME Wayland,
-horizontal swipes switch workspaces and vertical swipes control Activities.
-Five-finger and interrupted sequences are ignored until every finger lifts.
-
-Set `[native_gestures] enabled = false` to skip the gesture touchpad. Pointer,
-ring, taps, physical buttons, and two-finger horizontal window switching
-remain available, but native vertical/workspace gestures do not.
+On GNOME Wayland, three- and four-finger horizontal swipes switch workspaces;
+vertical swipes control Activities. Set `native_gestures.enabled = false` to
+disable them.
 
 ## How it works
 
-Single touches are classified by where the primary finger begins. An
-inner-zone touch produces relative pointer motion. A ring-zone touch converts
-angular movement into high-resolution and legacy wheel events. The zone
-remains locked until lift so drift cannot change modes unexpectedly.
-
-The compositor sees normal pointer events from one virtual device and native
-multitouch gesture sequences from a separate four-slot virtual touchpad.
-Two-finger vertical motion is represented as three virtual contacts; real
-three/four-finger positions retain stable virtual slots. The gesture device
-is intentionally silent for taps, pointer movement, and ring scrolling, so
-it cannot duplicate those actions.
+The daemon grabs the physical evdev device and creates separate uinput
+pointer, shortcut-keyboard, and gesture-touchpad devices. A touch that starts
+in the inner zone moves the pointer; one that starts on the ring scrolls.
 
 Native gestures require GNOME on Wayland. There is no Xorg gesture fallback.
 
-## Development and testing
-
-On Windows, Ubuntu WSL2 can build and test the Linux code:
+## Troubleshooting
 
 ```bash
-rustup toolchain install stable
+systemctl --user status circulartrackpad.service
+journalctl --user -u circulartrackpad.service -n 30 --no-pager
+libinput list-devices
+```
+
+The physical device still appears under `hid-rmi`/libinput; this is normal.
+`circulartrackpad gestures` should be listed as a touchpad. Log out and back
+in if the service reports a device permission error.
+
+## Development and testing
+
+The project uses Rust 2021 and stable Rust:
+
+```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
@@ -178,8 +168,10 @@ cargo build --release
 bash -n install.sh enable-autostart.sh
 ```
 
-WSL does not expose the Panasonic `/dev/input` device, so final gesture and
-GNOME Wayland testing must be performed in the laptop's native Linux session.
+## Acknowledgements
+
+Based on the original [mikiobraun/circulartrackpad](https://github.com/mikiobraun/circulartrackpad)
+and the fork [b3r/circulartrackpad](https://github.com/b3r/circulartrackpad).
 
 ## License
 
